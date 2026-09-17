@@ -183,6 +183,7 @@ function renderToday(state, exits, openPositions) {
   const near = openPositions.filter(p => (p.below_ma20_days || 0) === 1);
   const calm = openPositions.filter(p => (p.below_ma20_days || 0) !== 1);
   const cands = gateBlocked ? [] : (state.long_candidates || []);
+  const shortCands = gateBlocked ? [] : (state.short_candidates || []);
 
   let h = `<div class="market-bar">
       <span>${esc(state.market_signal || "無大盤資料")}</span>
@@ -222,7 +223,23 @@ function renderToday(state, exits, openPositions) {
       </div>`).join("") + `</div>`;
   }
 
-  if (!exits.length && !cands.length) {
+  if (shortCands.length) {
+    h += `<div class="todo-block buy">
+      <div class="todo-head buy-text">🟡 短線拉回進場 <span class="n">${shortCands.length}</span></div>` +
+      shortCands.map(c => `<div class="action-card">
+        <div class="ac-top"><span class="id">${esc(c.stock_id)}</span>
+          <span class="price">${Number(c.close).toFixed(2)}</span>
+          <span class="pct ${pctClass(c.today_pct)}">${fmtPct(c.today_pct)}</span></div>
+        <div class="ac-reason buy-c">${esc((c.reasons || []).slice(0,3).join("／"))}</div>
+        ${c.stop_loss ? `<span class="stop-chip">停損 ${Number(c.stop_loss).toFixed(2)}</span>` : ""}
+        <button class="btn-primary" style="margin-top:10px"
+          data-log="${esc(c.stock_id)}" data-price="${esc(c.close)}">📝 我買了這支 → 記錄真實持倉</button>
+      </div>`).join("") +
+      `<div class="ac-sub" style="margin-top:10px">短線標的不列入系統模擬持倉追蹤（模擬帳戶只做中長線），
+        買了請自行記錄真實持倉</div></div>`;
+  }
+
+  if (!exits.length && !cands.length && !shortCands.length) {
     h += `<div class="todo-block none">✓ 今日無需任何動作${gateBlocked ? "（夜盤收黑，暫停進場）" : ""}</div>`;
   }
 
