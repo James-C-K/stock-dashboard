@@ -1,17 +1,437 @@
 <!DOCTYPE html>
 <html lang="zh-Hant">
 <head>
-<meta charset="utf-8">
+<meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>台股策略儀表板</title>
 <style>
-  body { font-family: -apple-system, sans-serif; background:#0b0e14; color:#e6e6e6; margin:0; padding:40px 20px; text-align:center; }
-  h1 { font-size:20px; }
-  p { color:#9aa4b2; }
+  :root {
+    --bg:#0b0e14; --card:#151a24; --card-border:#232937;
+    --text:#e6e6e6; --text-dim:#8b95a5;
+    --green:#2ecc71; --red:#ff5c5c; --yellow:#f5c542; --blue:#4da8ff; --accent:#6b7bff;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"PingFang TC","Helvetica Neue",sans-serif;
+    padding-bottom:78px}
+  .content{padding:14px 16px 20px;max-width:560px;margin:0 auto}
+
+  .market-bar{display:flex;align-items:center;gap:8px;background:var(--card);
+    border:1px solid var(--card-border);border-radius:12px;padding:9px 14px;
+    font-size:12px;margin-bottom:8px;color:var(--text-dim);flex-wrap:wrap}
+  .market-bar .date{margin-left:auto}
+  .gate-warn{background:rgba(255,92,92,0.1);border:1px solid rgba(255,92,92,0.35);
+    color:#ffb3b3;border-radius:12px;padding:9px 14px;font-size:12px;margin-bottom:16px;line-height:1.5}
+
+  .todo-block{border-radius:16px;padding:14px;margin-bottom:14px}
+  .todo-block.sell{background:linear-gradient(145deg,rgba(255,92,92,.16),rgba(255,92,92,.05));
+    border:1.5px solid rgba(255,92,92,.4)}
+  .todo-block.buy{background:linear-gradient(145deg,rgba(46,204,113,.16),rgba(46,204,113,.05));
+    border:1.5px solid rgba(46,204,113,.4)}
+  .todo-block.none{background:var(--card);border:1px solid var(--card-border);
+    text-align:center;color:var(--text-dim);font-size:13px;padding:18px}
+  .todo-head{display:flex;align-items:center;gap:8px;font-size:14px;font-weight:800;margin-bottom:10px}
+  .todo-head.sell-text{color:var(--red)} .todo-head.buy-text{color:var(--green)}
+  .todo-head .n{font-size:11px;font-weight:700;background:rgba(255,255,255,.1);padding:1px 7px;border-radius:8px}
+
+  .action-card{background:rgba(0,0,0,.22);border-radius:12px;padding:12px;margin-bottom:8px}
+  .action-card:last-child{margin-bottom:0}
+  .ac-top{display:flex;align-items:baseline;gap:8px}
+  .ac-top .id{font-size:16px;font-weight:800}
+  .ac-top .name{font-size:13px;color:var(--text-dim)}
+  .ac-top .price{margin-left:auto;font-size:16px;font-weight:800}
+  .ac-top .pct{font-size:12px;font-weight:700}
+  .pct.up{color:var(--green)} .pct.down{color:var(--red)}
+  .ac-reason{margin-top:6px;font-size:12.5px;font-weight:600;line-height:1.5}
+  .ac-reason.sell-c{color:#ffb3b3} .ac-reason.buy-c{color:#a8f0c6}
+  .ac-sub{margin-top:6px;font-size:11px;color:var(--text-dim)}
+  .stop-chip{display:inline-block;margin-top:8px;font-size:11px;color:var(--text-dim);
+    background:rgba(255,255,255,.06);padding:4px 9px;border-radius:8px}
+
+  .section-title{display:flex;align-items:center;gap:6px;font-size:12.5px;font-weight:700;
+    color:var(--text-dim);letter-spacing:.5px;margin:22px 0 10px}
+  .section-title .count{background:var(--card-border);color:var(--text);
+    border-radius:8px;padding:1px 7px;font-size:11px}
+
+  .card{background:var(--card);border:1px solid var(--card-border);border-radius:14px;
+    padding:13px 14px;margin-bottom:8px}
+  .card-head{display:flex;align-items:baseline;gap:8px}
+  .card-head .id{font-size:14px;font-weight:700}
+  .card-head .name{font-size:12.5px;color:var(--text-dim)}
+  .card-head .price{margin-left:auto;font-size:15px;font-weight:700}
+  .card-head .pct{font-size:11.5px;font-weight:600}
+  .meta-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:9px;
+    font-size:10.5px;color:var(--text-dim)}
+  .meta-grid .val{display:block;font-size:13px;font-weight:700;color:var(--text);margin-top:2px}
+  .source-tag{font-size:9.5px;font-weight:700;padding:1px 7px;border-radius:7px;margin-left:6px}
+  .source-tag.sim{background:rgba(77,168,255,.15);color:var(--blue)}
+  .source-tag.real{background:rgba(245,197,66,.15);color:var(--yellow)}
+  .trail-tag{font-size:9.5px;font-weight:700;padding:1px 7px;border-radius:7px;margin-left:6px;
+    background:rgba(46,204,113,.15);color:var(--green)}
+  .watch-note{margin-top:8px;font-size:11px;color:#f0dc9e;background:rgba(245,197,66,.08);
+    padding:6px 9px;border-radius:8px;line-height:1.5}
+
+  button{font-family:inherit;cursor:pointer}
+  .btn-primary{width:100%;padding:11px;border:none;border-radius:10px;background:var(--green);
+    color:#0b0e14;font-size:12.5px;font-weight:800}
+  .btn-outline{width:100%;padding:12px;border:1.5px dashed var(--card-border);border-radius:14px;
+    background:transparent;color:var(--text-dim);font-size:12.5px;font-weight:700;margin-bottom:8px}
+
+  .stat-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-top:4px}
+  .stat-box{background:rgba(255,255,255,.03);border-radius:10px;padding:10px;text-align:center}
+  .stat-box .num{font-size:18px;font-weight:800}
+  .stat-box .num.g{color:var(--green)} .stat-box .num.r{color:var(--red)}
+  .stat-box .label{font-size:10px;color:var(--text-dim);margin-top:2px}
+
+  .hist-row{display:flex;align-items:center;gap:8px;padding:10px 0;
+    border-bottom:1px solid var(--card-border);font-size:12px}
+  .hist-row:last-child{border-bottom:none}
+  .hist-row .id{font-weight:700;width:44px}
+  .hist-row .dates{color:var(--text-dim);font-size:10.5px;flex:1}
+  .hist-row .pnl{font-weight:800;font-size:13px}
+
+  .tab-page{display:none} .tab-page.active{display:block}
+  .tabbar{position:fixed;bottom:0;left:0;right:0;display:flex;
+    border-top:1px solid var(--card-border);padding:8px 0 20px;background:#0f1219}
+  .tabbar .tab{flex:1;text-align:center;font-size:11px;color:var(--text-dim);
+    background:none;border:none}
+  .tabbar .tab.active{color:var(--accent);font-weight:700}
+  .tabbar .tab .icon{font-size:18px;display:block;margin-bottom:2px}
+
+  .footer-note{text-align:center;font-size:11px;color:var(--text-dim);
+    margin-top:22px;line-height:1.6;padding:0 8px}
+  .loading{text-align:center;color:var(--text-dim);font-size:13px;padding:40px 0}
+  .error-box{background:rgba(255,92,92,.1);border:1px solid rgba(255,92,92,.35);
+    color:#ffb3b3;border-radius:12px;padding:12px;font-size:12px;line-height:1.6}
+
+  dialog{border:none;border-radius:16px;background:var(--card);color:var(--text);
+    padding:18px;width:88%;max-width:360px}
+  dialog::backdrop{background:rgba(0,0,0,.6)}
+  dialog h3{margin:0 0 14px;font-size:15px}
+  dialog label{display:block;font-size:11px;color:var(--text-dim);margin:10px 0 4px}
+  dialog input{width:100%;padding:9px;border-radius:8px;border:1px solid var(--card-border);
+    background:#0f1219;color:var(--text);font-size:14px;font-family:inherit}
+  .dialog-actions{display:flex;gap:8px;margin-top:16px}
+  .dialog-actions button{flex:1;padding:10px;border-radius:9px;border:none;font-size:12.5px;font-weight:700}
+  .btn-cancel{background:var(--card-border);color:var(--text)}
+  .btn-save{background:var(--green);color:#0b0e14}
 </style>
 </head>
 <body>
-  <h1>📊 台股策略儀表板</h1>
-  <p>建置中 — 資料即將上線</p>
+  <div class="content">
+    <div id="boot" class="loading">載入中…</div>
+
+    <div class="tab-page" id="page-today"></div>
+    <div class="tab-page" id="page-holdings"></div>
+    <div class="tab-page" id="page-history"></div>
+  </div>
+
+  <div class="tabbar" id="tabbar" hidden>
+    <button class="tab active" data-page="page-today"><span class="icon">🏠</span>今日</button>
+    <button class="tab" data-page="page-holdings"><span class="icon">📌</span>持倉</button>
+    <button class="tab" data-page="page-history"><span class="icon">📈</span>歷史</button>
+  </div>
+
+  <dialog id="log-dialog">
+    <h3>記錄真實買入</h3>
+    <form id="log-form">
+      <label>股票代號</label>
+      <input name="stock_id" required inputmode="numeric" placeholder="2409">
+      <label>買入價（每股 NT$）</label>
+      <input name="buy_price" required inputmode="decimal" placeholder="30.0">
+      <label>股數（1張 = 1000股）</label>
+      <input name="shares" required inputmode="numeric" placeholder="2000">
+      <label>買入日期</label>
+      <input name="buy_date" type="date" required>
+      <div class="dialog-actions">
+        <button type="button" class="btn-cancel" id="dlg-cancel">取消</button>
+        <button type="submit" class="btn-save">儲存</button>
+      </div>
+    </form>
+  </dialog>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/liff/2.23.2/liff.js"></script>
+<script>
+const SUPABASE_URL = "https://rkvlwhacptfdfkrdhdev.supabase.co";
+const SUPABASE_ANON_KEY = "sb_publishable_dFonoJvJqfJpfh3Yme080A_enha9o5X";
+const LIFF_ID = "2011648338-om5eZb72";
+
+const sbHeaders = {apikey: SUPABASE_ANON_KEY, Authorization: "Bearer " + SUPABASE_ANON_KEY};
+let profile = null;
+
+async function sbGet(path) {
+  const r = await fetch(SUPABASE_URL + "/rest/v1/" + path, {headers: sbHeaders});
+  if (!r.ok) throw new Error("Supabase " + r.status + ": " + (await r.text()).slice(0, 200));
+  return r.json();
+}
+
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c =>
+  ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const pctClass = v => Number(v) >= 0 ? "up" : "down";
+const fmtPct = v => (Number(v) >= 0 ? "+" : "") + Number(v).toFixed(1) + "%";
+const md = d => d ? String(d).slice(5).replace("-", "/") : "";
+
+function renderToday(state, exits, openPositions) {
+  const el = document.getElementById("page-today");
+  if (!state) {
+    el.innerHTML = `<div class="error-box">尚無今日資料 —— 每個交易日早上約 08:45 更新。<br>
+      若持續空白，可能是當日排程尚未執行。</div>`;
+    return;
+  }
+
+  const gateBlocked = state.entries_allowed === false;
+  const near = openPositions.filter(p => (p.below_ma20_days || 0) === 1);
+  const calm = openPositions.filter(p => (p.below_ma20_days || 0) !== 1);
+  const cands = gateBlocked ? [] : (state.long_candidates || []);
+
+  let h = `<div class="market-bar">
+      <span>${esc(state.market_signal || "無大盤資料")}</span>
+      <span class="date">${esc(state.run_date)}</span>
+    </div>`;
+  if (state.overnight_note) {
+    h += `<div class="market-bar"><span>🌙 ${esc(state.overnight_note)}</span></div>`;
+  }
+  if (gateBlocked) {
+    h += `<div class="gate-warn">⛔️ ${esc(state.gate_reason || "夜盤收黑")} — 依規則今日暫停新進場<br>
+      （已持有的部位不受影響，仍照出場規則逐日檢查）</div>`;
+  }
+
+  if (exits.length) {
+    h += `<div class="todo-block sell">
+      <div class="todo-head sell-text">🔴 今天該賣掉 <span class="n">${exits.length}</span></div>` +
+      exits.map(e => `<div class="action-card">
+        <div class="ac-top"><span class="id">${esc(e.stock_id)}</span>
+          <span class="price">${Number(e.exit_price).toFixed(2)}</span>
+          <span class="pct ${pctClass(e.pnl_pct)}">${fmtPct(e.pnl_pct)}</span></div>
+        <div class="ac-reason sell-c">出場規則觸發：${esc(e.reason)}</div>
+        <div class="ac-sub">${md(e.entry_date)} 進場 @${Number(e.entry_price).toFixed(2)}</div>
+      </div>`).join("") + `</div>`;
+  }
+
+  if (cands.length) {
+    h += `<div class="todo-block buy">
+      <div class="todo-head buy-text">🟢 今天可以進場 <span class="n">${cands.length}</span></div>` +
+      cands.map(c => `<div class="action-card">
+        <div class="ac-top"><span class="id">${esc(c.stock_id)}</span>
+          <span class="price">${Number(c.close).toFixed(2)}</span>
+          <span class="pct ${pctClass(c.today_pct)}">${fmtPct(c.today_pct)}</span></div>
+        <div class="ac-reason buy-c">符合進場規則：${esc((c.reasons || []).slice(0,4).join("／"))}</div>
+        ${c.stop_loss ? `<span class="stop-chip">停損 ${Number(c.stop_loss).toFixed(2)}</span>` : ""}
+        <button class="btn-primary" style="margin-top:10px"
+          data-log="${esc(c.stock_id)}" data-price="${esc(c.close)}">📝 我買了這支 → 記錄真實持倉</button>
+      </div>`).join("") + `</div>`;
+  }
+
+  if (!exits.length && !cands.length) {
+    h += `<div class="todo-block none">✓ 今日無需任何動作${gateBlocked ? "（夜盤收黑，暫停進場）" : ""}</div>`;
+  }
+
+  if (near.length) {
+    h += `<div class="section-title">⚠️ 接近出場門檻 <span class="count">${near.length}</span></div>` +
+      near.map(p => `<div class="card">
+        <div class="card-head"><span class="id">${esc(p.stock_id)}</span>
+          <span class="price">${Number(p.current_price ?? p.entry_price).toFixed(2)}</span>
+          <span class="pct ${pctClass(p.unrealized_pct)}">${fmtPct(p.unrealized_pct || 0)}</span></div>
+        <div class="watch-note">今天收盤第 1 天跌破 MA20 — 規則需連續 2 天才觸發，明天再跌破就會進到「該賣掉」</div>
+      </div>`).join("");
+  }
+
+  if (calm.length) {
+    h += `<div class="section-title">📌 系統模擬持倉，維持現狀 <span class="count">${calm.length}</span></div>` +
+      calm.map(p => holdingCard(p, "sim")).join("");
+  }
+
+  h += `<div class="footer-note">系統依規則自動模擬進出場，僅供觀察參考，非投資建議</div>`;
+  el.innerHTML = h;
+}
+
+function holdingCard(p, kind) {
+  const price = Number(p.current_price ?? p.entry_price);
+  const tag = kind === "sim"
+    ? `<span class="source-tag sim">🤖 系統模擬</span>`
+    : `<span class="source-tag real">💰 真實持倉</span>`;
+  const trail = p.trail_activated ? `<span class="trail-tag">移動停利已啟動</span>` : "";
+  return `<div class="card">
+    <div class="card-head"><span class="id">${esc(p.stock_id)}</span>${tag}${trail}
+      <span class="price">${price.toFixed(2)}</span>
+      <span class="pct ${pctClass(p.unrealized_pct)}">${fmtPct(p.unrealized_pct || 0)}</span></div>
+    <div class="meta-grid">
+      <div>進場日<span class="val">${md(p.entry_date)}</span></div>
+      <div>進場價<span class="val">${Number(p.entry_price).toFixed(2)}</span></div>
+      <div>停損<span class="val">${p.stop_loss ? Number(p.stop_loss).toFixed(2) : "—"}</span></div>
+    </div>
+  </div>`;
+}
+
+function renderHoldings(openPositions, myManual) {
+  const el = document.getElementById("page-holdings");
+  let h = `<div class="section-title">💰 我的真實持倉 <span class="count">${myManual.length}</span></div>`;
+  if (!myManual.length) {
+    h += `<div class="card" style="text-align:center;color:var(--text-dim);font-size:13px">
+      尚未記錄任何真實買入</div>`;
+  } else {
+    h += myManual.map(m => {
+      const cost = Number(m.buy_price) * Number(m.shares);
+      return `<div class="card">
+        <div class="card-head"><span class="id">${esc(m.stock_id)}</span>
+          <span class="source-tag real">💰 真實持倉</span>
+          <span class="price">${Number(m.buy_price).toFixed(2)}</span></div>
+        <div class="meta-grid">
+          <div>買入日<span class="val">${md(m.buy_date)}</span></div>
+          <div>股數<span class="val">${Number(m.shares).toLocaleString()}</span></div>
+          <div>成本<span class="val">NT$${Math.round(cost).toLocaleString()}</span></div>
+        </div>
+      </div>`;
+    }).join("");
+  }
+  h += `<button class="btn-outline" id="add-holding">＋ 記錄我實際買的股票</button>`;
+
+  h += `<div class="section-title">🤖 系統模擬持倉 <span class="count">${openPositions.length}</span></div>`;
+  h += openPositions.length
+    ? openPositions.map(p => holdingCard(p, "sim")).join("")
+    : `<div class="card" style="text-align:center;color:var(--text-dim);font-size:13px">目前無模擬持倉</div>`;
+
+  h += `<div class="footer-note">
+    💰真實持倉＝你自己記錄的買入紀錄（只有你看得到自己的）<br>
+    🤖系統模擬＝規則自動判斷「照規則做會怎樣」，供對照參考</div>`;
+  el.innerHTML = h;
+}
+
+function renderHistory(closed) {
+  const el = document.getElementById("page-history");
+  if (!closed.length) {
+    el.innerHTML = `<div class="card" style="text-align:center;color:var(--text-dim);font-size:13px">
+      尚無已平倉的模擬交易紀錄</div>
+      <div class="footer-note">系統開始運作後，每筆模擬進出場都會記錄在這裡</div>`;
+    return;
+  }
+  const wins = closed.filter(t => Number(t.pnl_pct) > 0);
+  const losses = closed.filter(t => Number(t.pnl_pct) <= 0);
+  const avg = a => a.length ? a.reduce((s,t)=>s+Number(t.pnl_pct),0)/a.length : 0;
+
+  let h = `<div class="section-title">📊 系統模擬實際成績</div>
+    <div class="card"><div class="stat-grid">
+      <div class="stat-box"><div class="num">${closed.length}</div><div class="label">已平倉筆數</div></div>
+      <div class="stat-box"><div class="num">${(wins.length/closed.length*100).toFixed(1)}%</div>
+        <div class="label">勝率（${wins.length}勝${losses.length}敗）</div></div>
+      <div class="stat-box"><div class="num g">${avg(wins).toFixed(2)}%</div><div class="label">平均賺</div></div>
+      <div class="stat-box"><div class="num r">${avg(losses).toFixed(2)}%</div><div class="label">平均賠</div></div>
+    </div></div>`;
+
+  h += `<div class="section-title">📁 逐筆紀錄 <span class="count">${closed.length}</span></div><div class="card">` +
+    closed.map(t => `<div class="hist-row">
+      <span class="id">${esc(t.stock_id)}</span>
+      <span class="dates">${md(t.entry_date)} @${Number(t.entry_price).toFixed(2)} →
+        ${md(t.exit_date)} @${Number(t.exit_price).toFixed(2)}<br>${esc(t.exit_reason || "")}</span>
+      <span class="pnl" style="color:${Number(t.pnl_pct)>=0?"var(--green)":"var(--red)"}">
+        ${fmtPct(t.pnl_pct)}</span>
+    </div>`).join("") + `</div>`;
+
+  h += `<div class="footer-note">以上為系統模擬帳戶的實際進出場紀錄（非歷史回測數字）</div>`;
+  el.innerHTML = h;
+}
+
+function wireDialog() {
+  const dlg = document.getElementById("log-dialog");
+  const form = document.getElementById("log-form");
+
+  document.body.addEventListener("click", e => {
+    const logBtn = e.target.closest("[data-log]");
+    if (logBtn) {
+      form.stock_id.value = logBtn.dataset.log;
+      form.buy_price.value = logBtn.dataset.price || "";
+      form.buy_date.value = new Date().toISOString().slice(0, 10);
+      dlg.showModal();
+      return;
+    }
+    if (e.target.id === "add-holding") {
+      form.reset();
+      form.buy_date.value = new Date().toISOString().slice(0, 10);
+      dlg.showModal();
+    }
+  });
+
+  document.getElementById("dlg-cancel").onclick = () => dlg.close();
+
+  form.onsubmit = async ev => {
+    ev.preventDefault();
+    const payload = {
+      stock_id: form.stock_id.value.trim(),
+      buy_price: Number(form.buy_price.value),
+      shares: Number(form.shares.value),
+      buy_date: form.buy_date.value,
+      line_user_id: profile ? profile.userId : null,
+      status: "open",
+    };
+    try {
+      const r = await fetch(SUPABASE_URL + "/rest/v1/positions_manual", {
+        method: "POST",
+        headers: {...sbHeaders, "Content-Type": "application/json"},
+        body: JSON.stringify([payload]),
+      });
+      if (!r.ok) throw new Error(await r.text());
+      dlg.close();
+      await load();
+    } catch (err) {
+      alert("儲存失敗：" + err.message);
+    }
+  };
+}
+
+async function load() {
+  const today = new Date().toISOString().slice(0, 10);
+  const [stateRows, openRows, closedRows, manualRows] = await Promise.all([
+    sbGet("daily_state?order=run_date.desc&limit=1"),
+    sbGet("simulated_positions?status=eq.open&order=entry_date.asc"),
+    sbGet("simulated_positions?status=eq.closed&order=exit_date.desc&limit=50"),
+    profile
+      ? sbGet(`positions_manual?status=eq.open&line_user_id=eq.${encodeURIComponent(profile.userId)}&order=buy_date.desc`)
+      : Promise.resolve([]),
+  ]);
+
+  const state = stateRows[0] || null;
+  const exits = state && state.run_date === today ? (state.exits_today || []) : [];
+
+  renderToday(state, exits, openRows);
+  renderHoldings(openRows, manualRows);
+  renderHistory(closedRows);
+
+  document.getElementById("boot").hidden = true;
+  document.getElementById("tabbar").hidden = false;
+  document.getElementById("page-today").classList.add("active");
+}
+
+document.querySelectorAll(".tab").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".tab").forEach(b => b.classList.remove("active"));
+    document.querySelectorAll(".tab-page").forEach(p => p.classList.remove("active"));
+    btn.classList.add("active");
+    document.getElementById(btn.dataset.page).classList.add("active");
+  });
+});
+
+(async () => {
+  wireDialog();
+  try {
+    await liff.init({liffId: LIFF_ID});
+    if (liff.isLoggedIn()) {
+      profile = await liff.getProfile();
+    } else if (liff.isInClient()) {
+      liff.login();
+      return;
+    }
+  } catch (e) {
+    // Opened outside LINE (plain browser) — still usable read-only; the
+    // manual-holdings list just can't be tied to a LINE identity.
+    console.warn("LIFF unavailable:", e);
+  }
+  try {
+    await load();
+  } catch (e) {
+    document.getElementById("boot").innerHTML =
+      `<div class="error-box">資料載入失敗：${esc(e.message)}</div>`;
+  }
+})();
+</script>
 </body>
 </html>
