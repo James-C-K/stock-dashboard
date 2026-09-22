@@ -161,6 +161,7 @@ const LIFF_ID = "2011648338-om5eZb72";
 
 const sbHeaders = {apikey: SUPABASE_ANON_KEY, Authorization: "Bearer " + SUPABASE_ANON_KEY};
 let profile = null;
+let liffReady = false;  // liff.init succeeded, so liff.login() is available
 
 async function sbGet(path) {
   const r = await fetch(SUPABASE_URL + "/rest/v1/" + path, {headers: sbHeaders});
@@ -308,6 +309,12 @@ function holdingCard(p, kind) {
 function renderHoldings(openPositions, myManual) {
   const el = document.getElementById("page-holdings");
   let h = `<div class="section-title">💰 我的真實持倉 <span class="count">${myManual.length}</span></div>`;
+  if (!profile) {
+    h += `<div class="gate-warn">尚未登入 LINE — 真實持倉是依你的 LINE 帳號儲存與讀取，
+      未登入時無法記錄，也看不到自己的紀錄。
+      ${liffReady ? `<button class="btn-primary" style="margin-top:8px" id="line-login">用 LINE 登入</button>`
+        : `<br>請從 LINE 聊天室裡的連結開啟此頁。`}</div>`;
+  }
   if (!myManual.length) {
     h += `<div class="card" style="text-align:center;color:var(--text-dim);font-size:13px">
       尚未記錄任何真實買入</div>`;
@@ -393,6 +400,10 @@ function wireDialog() {
       dlg.showModal();
       return;
     }
+    if (e.target.id === "line-login") {
+      liff.login({redirectUri: location.href});
+      return;
+    }
     if (e.target.id === "add-holding") {
       form.reset();
       form.buy_date.value = twToday();
@@ -404,25 +415,53 @@ function wireDialog() {
 
   form.onsubmit = async ev => {
     ev.preventDefault();
+    // Without a LINE identity the row would be saved with no owner, and the
+    // holdings list (filtered by line_user_id) would never show it.
+    if (!profile) {
+      if (liffReady && confirm("需要先用 LINE 登入才能記錄真實持倉，現在登入？")) {
+        liff.login({redirectUri: location.href});
+      } else if (!liffReady) {
+        alert("無法取得 LINE 身分，請從 LINE 聊天室裡的連結開啟此頁再記錄。");
+      }
+      return;
+    }
+    // iOS keyboards in some locales type "," as the decimal separator.
+    const num = v => Number(String(v).trim().replace(",", "."));
     const payload = {
       stock_id: form.stock_id.value.trim(),
-      buy_price: Number(form.buy_price.value),
-      shares: Number(form.shares.value),
+      buy_price: num(form.buy_price.value),
+      shares: num(form.shares.value),
       buy_date: form.buy_date.value,
-      line_user_id: profile ? profile.userId : null,
+      line_user_id: profile.userId,
       status: "open",
     };
+    if (!/^\d{4,6}[A-Z]?$/.test(payload.stock_id) || !(payload.buy_price > 0)
+        || !(payload.shares > 0) || !Number.isInteger(payload.shares)) {
+      alert("請確認代號、買入價與股數（股數需為整數）");
+      return;
+    }
+    const btn = form.querySelector(".btn-save");
+    btn.disabled = true;
     try {
       const r = await fetch(SUPABASE_URL + "/rest/v1/positions_manual", {
         method: "POST",
         headers: {...sbHeaders, "Content-Type": "application/json"},
         body: JSON.stringify([payload]),
       });
-      if (!r.ok) throw new Error(await r.text());
+      if (!r.ok) {
+        const body = await r.text();
+        if (r.status === 401 || r.status === 403 || body.includes("row-level security")) {
+          throw new Error("資料庫拒絕寫入（positions_manual 缺少 RLS insert 權限）\n" + body.slice(0, 200));
+        }
+        throw new Error(`HTTP ${r.status}\n` + body.slice(0, 300));
+      }
       dlg.close();
       await load();
+      document.querySelector('.tab[data-page="page-holdings"]').click();
     } catch (err) {
       alert("儲存失敗：" + err.message);
+    } finally {
+      btn.disabled = false;
     }
   };
 }
@@ -472,12 +511,16 @@ document.querySelectorAll(".tab").forEach(btn => {
   wireDialog();
   try {
     await liff.init({liffId: LIFF_ID});
+    liffReady = true;
     if (liff.isLoggedIn()) {
       profile = await liff.getProfile();
     } else if (liff.isInClient()) {
       liff.login();
       return;
     }
+    // Outside the LIFF client (e.g. the URL opened in LINE's normal in-app
+    // browser or Safari) the page stays read-only until the user taps
+    // "用 LINE 登入" on the holdings tab.
   } catch (e) {
     // Opened outside LINE (plain browser) — still usable read-only; the
     // manual-holdings list just can't be tied to a LINE identity.
