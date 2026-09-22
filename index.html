@@ -861,7 +861,9 @@ function wireDialog() {
     if (disc > 0 && disc <= 1) saveDiscount(disc);
     await saveAndReload(dlg, form.querySelector(".btn-save"), {
       stock_id: sid, buy_price: price, shares: n, buy_date: form.buy_date.value,
-      cost_total: Math.round(price * n + fee), status: "open", note: JSON.stringify({fee}),
+      // cost_total is a generated column (buy_price × shares) — never sent;
+      // the buy fee lives in note.fee.
+      status: "open", note: JSON.stringify({fee}),
     }, "page-holdings");
   };
 
@@ -878,7 +880,6 @@ function wireDialog() {
       stock_id: selling.stock_id, shares: n,
       // the lot's buy side, so every sale row is self-contained for analysis
       buy_price: Number(selling.buy_price), buy_date: selling.buy_date,
-      cost_total: Math.round(Number(selling.buy_price) * n + selling.fee * n / Number(selling.shares)),
       exit_price: price, exit_date: sform.date.value, exit_reason: sform.reason.value.trim() || null,
       status: "sell", note: JSON.stringify({ref: selling.id, fee, tax}),
     }, "page-records");
