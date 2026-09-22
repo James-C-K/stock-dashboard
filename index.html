@@ -244,6 +244,11 @@
 <!-- Official LINE CDN; the SDK is not published on cdnjs (that URL 404s). -->
 <script charset="utf-8" src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
 <script>
+// Bump on every deploy. GitHub Pages lets browsers cache this page for up
+// to 10 minutes; checkForUpdate() compares against the live copy and
+// reloads, so a fix is visible on the next open rather than 10 minutes later.
+const BUILD = "2026-09-23.1";
+
 const SUPABASE_URL = "https://rkvlwhacptfdfkrdhdev.supabase.co";
 const SUPABASE_ANON_KEY = "sb_publishable_dFonoJvJqfJpfh3Yme080A_enha9o5X";
 const LIFF_ID = "2011648338-om5eZb72";
@@ -709,7 +714,7 @@ function renderSim(openPositions, closed) {
     </div>`).join("") + `</div>`
     : `<div class="card" style="text-align:center;color:var(--text-dim);font-size:13px">尚無平倉紀錄</div>`;
 
-  h += `<div class="footer-note">以上為系統模擬帳戶的實際紀錄（非歷史回測），非投資建議</div>`;
+  h += `<div class="footer-note">以上為系統模擬帳戶的實際紀錄（非歷史回測），非投資建議<br>版本 ${BUILD}</div>`;
   el.innerHTML = h;
 }
 
@@ -976,10 +981,27 @@ document.querySelectorAll(".tab").forEach(btn => {
   }
 })();
 
+async function checkForUpdate() {
+  try {
+    const r = await fetch(location.pathname + "?build=" + Date.now(), {cache: "no-store"});
+    const live = (await r.text()).match(/const BUILD = "([^"]+)"/)?.[1];
+    if (live && live !== BUILD && !sessionStorage.getItem("reloadedFor" + live)) {
+      sessionStorage.setItem("reloadedFor" + live, "1");  // never loop
+      const q = new URLSearchParams(location.search);
+      q.set("v", live);                                    // new URL = not the cached copy
+      location.replace(location.pathname + "?" + q + location.hash);
+      return true;
+    }
+  } catch (_) {}
+  return false;
+}
+checkForUpdate();
+
 // Prices move during the session; re-pull when the page comes back to the
 // foreground (switching back to LINE) and every few minutes while open.
 async function refresh() {
   if (document.visibilityState !== "visible" || document.querySelector("dialog[open]")) return;
+  if (await checkForUpdate()) return;
   const active = document.querySelector(".tab.active")?.dataset.page;
   try { await load(); } catch (e) { console.warn("refresh failed:", e); return; }
   if (active) document.querySelector(`.tab[data-page="${active}"]`).click();
