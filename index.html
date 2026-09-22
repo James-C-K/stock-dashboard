@@ -71,6 +71,22 @@
   .ac-top .name,.card-head .name{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
   .quote-line{margin-top:6px;font-size:11px;color:var(--text-dim)}
   .quote-line b{color:var(--text)}
+  .ohlc{display:grid;grid-template-columns:repeat(4,1fr);gap:4px;margin-top:9px;padding:8px 10px;
+    background:rgba(255,255,255,.03);border-radius:9px;font-size:10.5px;color:var(--text-dim)}
+  .ohlc .val{display:block;font-size:12.5px;font-weight:700;color:var(--text);margin-top:1px}
+  .ohlc-foot{grid-column:1/-1;font-size:10px;margin-top:3px}
+  details.exit-plan{margin-top:9px;border-top:1px solid var(--card-border);padding-top:8px}
+  details.exit-plan summary{font-size:11.5px;font-weight:700;cursor:pointer;list-style:none;color:var(--text)}
+  details.exit-plan summary::-webkit-details-marker{display:none}
+  details.exit-plan summary .hint{color:var(--text-dim);font-weight:600}
+  .exit-row{display:flex;gap:8px;padding:7px 0;border-bottom:1px dashed var(--card-border);font-size:11.5px;line-height:1.5}
+  .exit-row:last-of-type{border-bottom:none}
+  .exit-row .ico{width:18px;flex:none}
+  .exit-row .body{flex:1}
+  .exit-row .lvl{font-weight:800}
+  .exit-row .st{display:block;color:var(--text-dim);font-size:10.5px}
+  .exit-row.hot .lvl{color:var(--red)}
+  .exit-note{font-size:10.5px;color:var(--text-dim);line-height:1.6;margin-top:6px}
   .watch-note{margin-top:8px;font-size:11px;color:#f0dc9e;background:rgba(245,197,66,.08);
     padding:6px 9px;border-radius:8px;line-height:1.5}
 
@@ -183,6 +199,9 @@ const twToday = () => new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 1
 // Filled by load(): latest price + name per ticker (Storage dashboard/quotes.json).
 let quotes = {};
 let names = {};
+// Exit-rule parameters, published by the screener alongside the quotes so
+// this page never drifts from the rules the simulation actually runs.
+let rules = {trail_activation_pct: 10, trail_drawdown_pct: 5, ma20_exit_days: 2, slot_capital: 20000};
 const nameTag = id => names[id] ? `<span class="name">${esc(names[id])}</span>` : "";
 function quoteTime(q) {
   if (!q || !q.quote_time) return "";
@@ -284,27 +303,112 @@ function candQuoteLine(c) {
     <span class="pct ${pctClass(vsSignal)}">${fmtPct(vsSignal)}</span> vs 訊號價 · ${esc(quoteTime(q))}</div>`;
 }
 
+const f2 = v => Number(v).toFixed(2);
+const nt = v => (v >= 0 ? "+" : "−") + "NT$" + Math.abs(Math.round(v)).toLocaleString();
+const distPct = (from, to) => (to / from - 1) * 100;
+const daysBetween = (a, b) => Math.round((new Date(b) - new Date(a)) / 86400e3);
+
+// Today's bar: open / high / low / last (or close once the session is over).
+function ohlcBlock(q) {
+  if (!q || q.open == null) return "";
+  const t = new Date(new Date(q.quote_time).getTime() + 8 * 3600e3).toISOString();
+  const closed = q.source === "close" || t.slice(11, 16) >= "13:30" || t.slice(0, 10) < twToday();
+  return `<div class="ohlc">
+    <div>開<span class="val">${f2(q.open)}</span></div>
+    <div>高<span class="val">${f2(q.high)}</span></div>
+    <div>低<span class="val">${f2(q.low)}</span></div>
+    <div>${closed ? "收" : "現"}<span class="val">${f2(q.price)}</span></div>
+    <div class="ohlc-foot">${closed ? "收盤" : "盤中"}漲跌
+      <span class="pct ${pctClass(q.change_pct)}">${fmtPct(q.change_pct || 0)}</span>
+      ${q.volume_lots ? ` · 量 ${Number(q.volume_lots).toLocaleString()} 張` : ""} · ${esc(quoteTime(q))}</div>
+  </div>`;
+}
+
+// Every rule that can close the position, with its trigger level and how
+// far the current price is from it. Mirrors evaluate_long_exit (screen.py).
+function exitPlan(p, price) {
+  const q = quotes[p.stock_id] || {};
+  const E = Number(p.entry_price), S = Number(p.stop_loss);
+  const act = rules.trail_activation_pct, dd = rules.trail_drawdown_pct;
+  const rows = [];
+
+  if (S) rows.push({key: "停損", ico: "🛑", level: S, hot: price <= S,
+    text: `收盤 ≤ <span class="lvl">${f2(S)}</span>`,
+    st: `距現價 ${fmtPct(distPct(price, S))}｜觸發時損益約 ${fmtPct(distPct(E, S))}`});
+
+  if (q.ma20) {
+    const below = Number(p.below_ma20_days || 0);
+    rows.push({key: "月線", ico: "📉", level: Number(q.ma20), hot: below >= 1,
+      text: `收盤連續 ${rules.ma20_exit_days} 天低於月線 <span class="lvl">${f2(q.ma20)}</span>`,
+      st: `距現價 ${fmtPct(distPct(price, q.ma20))}｜${below ? `已連續 ${below} 天收在月線下` : "目前收在月線上"}`
+        + (q.ind_date ? `（MA20 為 ${md(q.ind_date)} 收盤值）` : "")});
+  }
+
+  if (p.trail_activated) {
+    const hw = Number(p.high_water || price), trig = hw * (1 - dd / 100);
+    rows.push({key: "移動停利", ico: "🎯", level: trig, hot: price <= trig,
+      text: `已啟動：收盤 ≤ <span class="lvl">${f2(trig)}</span>（最高收盤 ${f2(hw)} 回落 ${dd}%）`,
+      st: `距現價 ${fmtPct(distPct(price, trig))}｜觸發時損益約 ${fmtPct(distPct(E, trig))}`});
+  } else {
+    const on = E * (1 + act / 100);
+    rows.push({key: "移動停利", ico: "🎯", level: null, hot: false,
+      text: `收盤 ≥ <span class="lvl">${f2(on)}</span>（+${act}%）時啟動`,
+      st: `距現價 ${fmtPct(distPct(price, on))}｜啟動後從最高收盤回落 ${dd}% 就賣，把大部分獲利留住`});
+  }
+
+  if (q.k != null) {
+    rows.push({key: "技術轉弱", ico: "⚠️", level: null, hot: q.k < q.d && q.dif < 0,
+      text: `KD 死亡交叉 且 MACD DIF < 0`,
+      st: `目前 K ${q.k} / D ${q.d}，DIF ${q.dif}（${q.dif >= 0 ? "DIF 仍在 0 軸上，此條件不會觸發" : "DIF 已在 0 軸下"}）`});
+  }
+
+  // Summary line: the nearest price trigger below today's price.
+  // Summary line: anything already at its trigger first, else the nearest
+  // price trigger below today's price.
+  const hit = rows.filter(r => r.hot && (!r.level || price <= r.level));
+  const nearest = rows.filter(r => r.level && r.level < price).sort((a, b) => b.level - a.level)[0];
+  const summary = hit.length
+    ? `<span style="color:var(--red)">⚠️ 已觸及：${hit.map(r => r.key).join("、")}（看今天收盤）</span>`
+    : nearest
+      ? `最近的出場線：${nearest.key} ${f2(nearest.level)}（${fmtPct(distPct(price, nearest.level))}）`
+      : "";
+
+  return `<details class="exit-plan">
+    <summary>📋 出場計畫 <span class="hint">${summary}　▾</span></summary>
+    ${rows.map(r => `<div class="exit-row${r.hot ? " hot" : ""}"><span class="ico">${r.ico}</span>
+      <span class="body"><b>${r.key}</b>　${r.text}<span class="st">${r.st}</span></span></div>`).join("")}
+    <div class="exit-note">任一條件在「收盤」成立 → 隔天早上列入「該賣掉」。<br>
+      沒有固定目標價或持有天數：趨勢還在就續抱，漲超過 ${act}% 後由移動停利鎖住獲利；
+      另有「高位爆量收黑」出貨警訊也會出場。</div>
+  </details>`;
+}
+
 function holdingCard(p, kind) {
   const price = markPrice(p);
-  const pnl = (price / Number(p.entry_price) - 1) * 100;
+  const E = Number(p.entry_price);
+  const pnl = distPct(E, price);
   const q = quotes[p.stock_id];
+  const shares = Math.floor(rules.slot_capital / E);
+  const held = daysBetween(p.entry_date, twToday());
   const tag = kind === "sim"
     ? `<span class="source-tag sim">🤖 系統模擬</span>`
     : `<span class="source-tag real">💰 真實持倉</span>`;
   const trail = p.trail_activated ? `<span class="trail-tag">移動停利已啟動</span>` : "";
   return `<div class="card">
     <div class="card-head"><span class="id">${esc(p.stock_id)}</span>${nameTag(p.stock_id)}${tag}${trail}
-      <span class="price">${price.toFixed(2)}</span>
-      <span class="pct ${pctClass(pnl)}">${fmtPct(pnl)}</span></div>
+      <span class="price">${f2(price)}</span></div>
     <div class="meta-grid">
-      <div>進場日<span class="val">${md(p.entry_date)}</span></div>
-      <div>進場價<span class="val">${Number(p.entry_price).toFixed(2)}</span></div>
-      <div>停損<span class="val">${p.stop_loss ? Number(p.stop_loss).toFixed(2) : "—"}</span></div>
+      <div>進場 ${md(p.entry_date)}<span class="val">@${f2(E)}</span></div>
+      <div>模擬買進<span class="val">${shares.toLocaleString()} 股</span></div>
+      <div>未實現損益<span class="val" style="color:${pnl >= 0 ? "var(--green)" : "var(--red)"}">
+        ${nt((price - E) * shares)}<br><small>${fmtPct(pnl)}</small></span></div>
     </div>
-    ${q ? `<div class="quote-line">今日 <span class="pct ${pctClass(q.change_pct)}">${fmtPct(q.change_pct || 0)}</span>
-      · 更新 ${esc(quoteTime(q))}　（右上％＝相對進場價）</div>` : ""}
+    <div class="quote-line">成本 NT$${Math.round(shares * E).toLocaleString()}（每檔 NT$${Number(rules.slot_capital).toLocaleString()} 額度）
+      · 持有 ${held <= 0 ? "今天進場" : held + " 天"}</div>
+    ${ohlcBlock(q)}
     ${p.stop_loss && price <= Number(p.stop_loss) ? `<div class="watch-note">
       現價已低於停損價 — 規則以「收盤價」判斷，收盤仍在停損下，明早會出現在「該賣掉」</div>` : ""}
+    ${exitPlan(p, price)}
   </div>`;
 }
 
@@ -339,6 +443,7 @@ function renderHoldings(openPositions, myManual) {
             ${q ? (pnlNt >= 0 ? "+" : "−") + "NT$" + Math.abs(pnlNt).toLocaleString() : "—"}</span></div>
         </div>
         <div class="quote-line">成本 NT$${Math.round(cost).toLocaleString()}${q ? " · 更新 " + esc(quoteTime(q)) : " · 尚無報價"}</div>
+        ${ohlcBlock(q)}
       </div>`;
     }).join("");
   }
@@ -481,7 +586,7 @@ async function load() {
     // renders, just without live prices/names.
     fetch(SUPABASE_URL + "/storage/v1/object/public/dashboard/quotes.json?t=" + Date.now())
       .then(r => r.ok ? r.json() : {quotes: {}})
-      .then(j => Object.values(j.quotes || {}))
+      .then(j => { if (j.rules) rules = {...rules, ...j.rules}; return Object.values(j.quotes || {}); })
       .catch(e => { console.warn("quotes.json:", e); return []; }),
   ]);
 
