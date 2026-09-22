@@ -482,19 +482,21 @@ function holdingCard(p, kind) {
 // ── Real-trade ledger ───────────────────────────────────────────────────
 // positions_manual is append-only from this page (the public key may insert
 // and read, not update or delete), which also keeps a full audit trail:
-//   status "open" = a buy lot     note: {"fee": buy fee}
-//   status "sell" = a sale        note: {"ref": buy lot id, "fee", "tax"}
+// The table only allows status "open" / "closed", so the row kind is in note:
+//   open                          = a buy lot     note: {"fee": buy fee}
+//   closed + note.kind "sell"     = a sale        note: {"ref": buy lot id, "fee", "tax"}
 //                                 (exit_price/exit_date/shares = the sale)
-//   status "void" = cancels a row note: {"ref": cancelled row id}
+//   closed + note.kind "void"     = cancels a row note: {"ref": cancelled row id}, shares 0
 // A lot's remaining shares = its shares minus the sales that reference it.
 const meta = r => { try { return JSON.parse(r.note || "{}") || {}; } catch (_) { return {}; } };
 let ledger = {lots: [], trades: [], byId: {}, buys: []};
 
 function buildLedger(rows) {
-  const voided = new Set(rows.filter(r => r.status === "void").map(r => meta(r).ref));
-  const live = rows.filter(r => r.status !== "void" && !voided.has(r.id));
+  const isVoid = r => meta(r).kind === "void";
+  const voided = new Set(rows.filter(isVoid).map(r => meta(r).ref));
+  const live = rows.filter(r => !isVoid(r) && !voided.has(r.id));
   const buys = live.filter(r => r.status === "open");
-  const sells = live.filter(r => r.status === "sell");
+  const sells = live.filter(r => r.status === "closed" && meta(r).kind === "sell");
   const byId = Object.fromEntries(buys.map(b => [b.id, b]));
   const sold = {};
   for (const s of sells) sold[meta(s).ref] = (sold[meta(s).ref] || 0) + Number(s.shares);
@@ -711,6 +713,11 @@ function renderSim(openPositions, closed) {
   el.innerHTML = h;
 }
 
+// iOS keyboards in some locales type "," as the decimal separator.
+const num = v => Number(String(v ?? "").trim().replace(",", "."));
+
+// Without a LINE identity a row would be saved with no owner, and the
+// holdings list (filtered by line_user_id) would never show it.
 function requireProfile() {
   if (profile) return true;
   if (liffReady && confirm("需要先用 LINE 登入才能記錄真實持倉，現在登入？")) {
@@ -842,7 +849,7 @@ function wireDialog() {
       const row = ledger.byId[voidBtn.dataset.void] || ledger.trades.find(t => t.id === voidBtn.dataset.void);
       await saveAndReload(null, voidBtn, {
         stock_id: row?.stock_id || "0000", shares: 0, buy_price: 0, buy_date: twToday(),
-        status: "void", note: JSON.stringify({ref: voidBtn.dataset.void}),
+        status: "closed", note: JSON.stringify({kind: "void", ref: voidBtn.dataset.void}),
       }, document.querySelector(".tab.active")?.dataset.page || "page-holdings");
     }
   });
@@ -881,7 +888,7 @@ function wireDialog() {
       // the lot's buy side, so every sale row is self-contained for analysis
       buy_price: Number(selling.buy_price), buy_date: selling.buy_date,
       exit_price: price, exit_date: sform.date.value, exit_reason: sform.reason.value.trim() || null,
-      status: "sell", note: JSON.stringify({ref: selling.id, fee, tax}),
+      status: "closed", note: JSON.stringify({kind: "sell", ref: selling.id, fee, tax}),
     }, "page-records");
   };
 }
