@@ -153,7 +153,8 @@
     </form>
   </dialog>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/liff/2.23.2/liff.js"></script>
+<!-- Official LINE CDN; the SDK is not published on cdnjs (that URL 404s). -->
+<script charset="utf-8" src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
 <script>
 const SUPABASE_URL = "https://rkvlwhacptfdfkrdhdev.supabase.co";
 const SUPABASE_ANON_KEY = "sb_publishable_dFonoJvJqfJpfh3Yme080A_enha9o5X";
@@ -162,6 +163,7 @@ const LIFF_ID = "2011648338-om5eZb72";
 const sbHeaders = {apikey: SUPABASE_ANON_KEY, Authorization: "Bearer " + SUPABASE_ANON_KEY};
 let profile = null;
 let liffReady = false;  // liff.init succeeded, so liff.login() is available
+let liffError = "";     // why LIFF couldn't start, shown on the holdings tab
 
 async function sbGet(path) {
   const r = await fetch(SUPABASE_URL + "/rest/v1/" + path, {headers: sbHeaders});
@@ -313,7 +315,7 @@ function renderHoldings(openPositions, myManual) {
     h += `<div class="gate-warn">尚未登入 LINE — 真實持倉是依你的 LINE 帳號儲存與讀取，
       未登入時無法記錄，也看不到自己的紀錄。
       ${liffReady ? `<button class="btn-primary" style="margin-top:8px" id="line-login">用 LINE 登入</button>`
-        : `<br>請從 LINE 聊天室裡的連結開啟此頁。`}</div>`;
+        : `<br>請從 LINE 聊天室裡的連結開啟此頁。${liffError ? `<br><small>（${esc(liffError)}）</small>` : ""}`}</div>`;
   }
   if (!myManual.length) {
     h += `<div class="card" style="text-align:center;color:var(--text-dim);font-size:13px">
@@ -520,14 +522,24 @@ document.querySelectorAll(".tab").forEach(btn => {
     } else if (liff.isInClient()) {
       liff.login();
       return;
+    } else {
+      // Opened as a plain URL (LINE's normal in-app browser, Safari…): log in
+      // automatically once per session so the rich-menu link "just works".
+      // The flag stops a redirect loop if login is cancelled or fails; after
+      // that the holdings tab still offers a manual "用 LINE 登入" button.
+      let tried = false;
+      try { tried = sessionStorage.getItem("liffLoginTried") === "1"; } catch (_) {}
+      if (!tried) {
+        try { sessionStorage.setItem("liffLoginTried", "1"); } catch (_) {}
+        liff.login({redirectUri: location.href});
+        return;
+      }
     }
-    // Outside the LIFF client (e.g. the URL opened in LINE's normal in-app
-    // browser or Safari) the page stays read-only until the user taps
-    // "用 LINE 登入" on the holdings tab.
   } catch (e) {
     // Opened outside LINE (plain browser) — still usable read-only; the
     // manual-holdings list just can't be tied to a LINE identity.
     console.warn("LIFF unavailable:", e);
+    liffError = "LIFF 無法啟動：" + (e && e.message ? e.message : String(e));
   }
   try {
     await load();
