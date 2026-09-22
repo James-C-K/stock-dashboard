@@ -68,6 +68,9 @@
   .source-tag.real{background:rgba(245,197,66,.15);color:var(--yellow)}
   .trail-tag{font-size:9.5px;font-weight:700;padding:1px 7px;border-radius:7px;margin-left:6px;
     background:rgba(46,204,113,.15);color:var(--green)}
+  .ac-top .name,.card-head .name{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+  .quote-line{margin-top:6px;font-size:11px;color:var(--text-dim)}
+  .quote-line b{color:var(--text)}
   .watch-note{margin-top:8px;font-size:11px;color:#f0dc9e;background:rgba(245,197,66,.08);
     padding:6px 9px;border-radius:8px;line-height:1.5}
 
@@ -158,6 +161,7 @@ const LIFF_ID = "2011648338-om5eZb72";
 
 const sbHeaders = {apikey: SUPABASE_ANON_KEY, Authorization: "Bearer " + SUPABASE_ANON_KEY};
 let profile = null;
+let liffReady = false;  // liff.init succeeded, so liff.login() is available
 
 async function sbGet(path) {
   const r = await fetch(SUPABASE_URL + "/rest/v1/" + path, {headers: sbHeaders});
@@ -170,6 +174,28 @@ const esc = s => String(s ?? "").replace(/[&<>"']/g, c =>
 const pctClass = v => Number(v) >= 0 ? "up" : "down";
 const fmtPct = v => (Number(v) >= 0 ? "+" : "") + Number(v).toFixed(1) + "%";
 const md = d => d ? String(d).slice(5).replace("-", "/") : "";
+// Trading dates are Taiwan dates; toISOString() would give the UTC date,
+// which is still "yesterday" before 08:00 in Taipei.
+const twToday = () => new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 10);
+
+// Filled by load(): latest price + name per ticker (Storage dashboard/quotes.json).
+let quotes = {};
+let names = {};
+const nameTag = id => names[id] ? `<span class="name">${esc(names[id])}</span>` : "";
+function quoteTime(q) {
+  if (!q || !q.quote_time) return "";
+  const t = new Date(q.quote_time);
+  const d = new Date(t.getTime() + 8 * 3600e3).toISOString();
+  const hm = d.slice(11, 16);
+  return (d.slice(0, 10) === twToday() ? "" : md(d.slice(0, 10)) + " ") +
+    (q.source === "close" ? "收盤" : hm);
+}
+// Mark a position to the freshest price we have: intraday quote, else the
+// close the daily screen recorded, else the entry price.
+function markPrice(p) {
+  const q = quotes[p.stock_id];
+  return Number(q?.price ?? p.current_price ?? p.entry_price);
+}
 
 function renderToday(state, exits, openPositions) {
   const el = document.getElementById("page-today");
@@ -200,7 +226,7 @@ function renderToday(state, exits, openPositions) {
     h += `<div class="todo-block sell">
       <div class="todo-head sell-text">🔴 今天該賣掉 <span class="n">${exits.length}</span></div>` +
       exits.map(e => `<div class="action-card">
-        <div class="ac-top"><span class="id">${esc(e.stock_id)}</span>
+        <div class="ac-top"><span class="id">${esc(e.stock_id)}</span>${nameTag(e.stock_id)}
           <span class="price">${Number(e.exit_price).toFixed(2)}</span>
           <span class="pct ${pctClass(e.pnl_pct)}">${fmtPct(e.pnl_pct)}</span></div>
         <div class="ac-reason sell-c">出場規則觸發：${esc(e.reason)}</div>
@@ -212,10 +238,11 @@ function renderToday(state, exits, openPositions) {
     h += `<div class="todo-block buy">
       <div class="todo-head buy-text">🟢 今天可以進場 <span class="n">${cands.length}</span></div>` +
       cands.map(c => `<div class="action-card">
-        <div class="ac-top"><span class="id">${esc(c.stock_id)}</span>
+        <div class="ac-top"><span class="id">${esc(c.stock_id)}</span>${nameTag(c.stock_id)}
           <span class="price">${Number(c.close).toFixed(2)}</span>
           <span class="pct ${pctClass(c.today_pct)}">${fmtPct(c.today_pct)}</span></div>
-        <div class="ac-reason buy-c">符合進場規則：${esc((c.reasons || []).slice(0,4).join("／"))}</div>
+        <div class="ac-reason buy-c">符合進場規則：${esc((c.reasons || []).join("／"))}</div>
+        ${candQuoteLine(c)}
         ${c.stop_loss ? `<span class="stop-chip">停損 ${Number(c.stop_loss).toFixed(2)}</span>` : ""}
         <button class="btn-primary" style="margin-top:10px"
           data-log="${esc(c.stock_id)}" data-price="${esc(c.close)}">📝 我買了這支 → 記錄真實持倉</button>
@@ -229,9 +256,9 @@ function renderToday(state, exits, openPositions) {
   if (near.length) {
     h += `<div class="section-title">⚠️ 接近出場門檻 <span class="count">${near.length}</span></div>` +
       near.map(p => `<div class="card">
-        <div class="card-head"><span class="id">${esc(p.stock_id)}</span>
-          <span class="price">${Number(p.current_price ?? p.entry_price).toFixed(2)}</span>
-          <span class="pct ${pctClass(p.unrealized_pct)}">${fmtPct(p.unrealized_pct || 0)}</span></div>
+        <div class="card-head"><span class="id">${esc(p.stock_id)}</span>${nameTag(p.stock_id)}
+          <span class="price">${markPrice(p).toFixed(2)}</span>
+          <span class="pct ${pctClass(markPrice(p) / p.entry_price - 1)}">${fmtPct((markPrice(p) / p.entry_price - 1) * 100)}</span></div>
         <div class="watch-note">今天收盤第 1 天跌破 MA20 — 規則需連續 2 天才觸發，明天再跌破就會進到「該賣掉」</div>
       </div>`).join("");
   }
@@ -245,42 +272,71 @@ function renderToday(state, exits, openPositions) {
   el.innerHTML = h;
 }
 
+// Candidate prices are the signal-day close; show where it trades now so a
+// gap-up at the open (「第一根長紅不追」) is visible before logging a buy.
+function candQuoteLine(c) {
+  const q = quotes[c.stock_id];
+  if (!q || q.source === "close") return "";
+  const vsSignal = (Number(q.price) / Number(c.close) - 1) * 100;
+  return `<div class="quote-line">現價 <b>${Number(q.price).toFixed(2)}</b>
+    <span class="pct ${pctClass(vsSignal)}">${fmtPct(vsSignal)}</span> vs 訊號價 · ${esc(quoteTime(q))}</div>`;
+}
+
 function holdingCard(p, kind) {
-  const price = Number(p.current_price ?? p.entry_price);
+  const price = markPrice(p);
+  const pnl = (price / Number(p.entry_price) - 1) * 100;
+  const q = quotes[p.stock_id];
   const tag = kind === "sim"
     ? `<span class="source-tag sim">🤖 系統模擬</span>`
     : `<span class="source-tag real">💰 真實持倉</span>`;
   const trail = p.trail_activated ? `<span class="trail-tag">移動停利已啟動</span>` : "";
   return `<div class="card">
-    <div class="card-head"><span class="id">${esc(p.stock_id)}</span>${tag}${trail}
+    <div class="card-head"><span class="id">${esc(p.stock_id)}</span>${nameTag(p.stock_id)}${tag}${trail}
       <span class="price">${price.toFixed(2)}</span>
-      <span class="pct ${pctClass(p.unrealized_pct)}">${fmtPct(p.unrealized_pct || 0)}</span></div>
+      <span class="pct ${pctClass(pnl)}">${fmtPct(pnl)}</span></div>
     <div class="meta-grid">
       <div>進場日<span class="val">${md(p.entry_date)}</span></div>
       <div>進場價<span class="val">${Number(p.entry_price).toFixed(2)}</span></div>
       <div>停損<span class="val">${p.stop_loss ? Number(p.stop_loss).toFixed(2) : "—"}</span></div>
     </div>
+    ${q ? `<div class="quote-line">今日 <span class="pct ${pctClass(q.change_pct)}">${fmtPct(q.change_pct || 0)}</span>
+      · 更新 ${esc(quoteTime(q))}　（右上％＝相對進場價）</div>` : ""}
+    ${p.stop_loss && price <= Number(p.stop_loss) ? `<div class="watch-note">
+      現價已低於停損價 — 規則以「收盤價」判斷，收盤仍在停損下，明早會出現在「該賣掉」</div>` : ""}
   </div>`;
 }
 
 function renderHoldings(openPositions, myManual) {
   const el = document.getElementById("page-holdings");
   let h = `<div class="section-title">💰 我的真實持倉 <span class="count">${myManual.length}</span></div>`;
+  if (!profile) {
+    h += `<div class="gate-warn">尚未登入 LINE — 真實持倉是依你的 LINE 帳號儲存與讀取，
+      未登入時無法記錄，也看不到自己的紀錄。
+      ${liffReady ? `<button class="btn-primary" style="margin-top:8px" id="line-login">用 LINE 登入</button>`
+        : `<br>請從 LINE 聊天室裡的連結開啟此頁。`}</div>`;
+  }
   if (!myManual.length) {
     h += `<div class="card" style="text-align:center;color:var(--text-dim);font-size:13px">
       尚未記錄任何真實買入</div>`;
   } else {
     h += myManual.map(m => {
       const cost = Number(m.buy_price) * Number(m.shares);
+      const q = quotes[m.stock_id];
+      const price = q ? Number(q.price) : Number(m.buy_price);
+      const pnl = (price / Number(m.buy_price) - 1) * 100;
+      const pnlNt = Math.round((price - Number(m.buy_price)) * Number(m.shares));
       return `<div class="card">
-        <div class="card-head"><span class="id">${esc(m.stock_id)}</span>
+        <div class="card-head"><span class="id">${esc(m.stock_id)}</span>${nameTag(m.stock_id)}
           <span class="source-tag real">💰 真實持倉</span>
-          <span class="price">${Number(m.buy_price).toFixed(2)}</span></div>
+          <span class="price">${price.toFixed(2)}</span>
+          ${q ? `<span class="pct ${pctClass(pnl)}">${fmtPct(pnl)}</span>` : ""}</div>
         <div class="meta-grid">
-          <div>買入日<span class="val">${md(m.buy_date)}</span></div>
+          <div>買入<span class="val">${md(m.buy_date)} @${Number(m.buy_price).toFixed(2)}</span></div>
           <div>股數<span class="val">${Number(m.shares).toLocaleString()}</span></div>
-          <div>成本<span class="val">NT$${Math.round(cost).toLocaleString()}</span></div>
+          <div>損益<span class="val" style="color:${!q ? "var(--text)" : pnlNt >= 0 ? "var(--green)" : "var(--red)"}">
+            ${q ? (pnlNt >= 0 ? "+" : "−") + "NT$" + Math.abs(pnlNt).toLocaleString() : "—"}</span></div>
         </div>
+        <div class="quote-line">成本 NT$${Math.round(cost).toLocaleString()}${q ? " · 更新 " + esc(quoteTime(q)) : " · 尚無報價"}</div>
       </div>`;
     }).join("");
   }
@@ -321,7 +377,7 @@ function renderHistory(closed) {
   h += `<div class="section-title">📁 逐筆紀錄 <span class="count">${closed.length}</span></div><div class="card">` +
     closed.map(t => `<div class="hist-row">
       <span class="id">${esc(t.stock_id)}</span>
-      <span class="dates">${md(t.entry_date)} @${Number(t.entry_price).toFixed(2)} →
+      <span class="dates">${names[t.stock_id] ? esc(names[t.stock_id]) + "　" : ""}${md(t.entry_date)} @${Number(t.entry_price).toFixed(2)} →
         ${md(t.exit_date)} @${Number(t.exit_price).toFixed(2)}<br>${esc(t.exit_reason || "")}</span>
       <span class="pnl" style="color:${Number(t.pnl_pct)>=0?"var(--green)":"var(--red)"}">
         ${fmtPct(t.pnl_pct)}</span>
@@ -340,13 +396,17 @@ function wireDialog() {
     if (logBtn) {
       form.stock_id.value = logBtn.dataset.log;
       form.buy_price.value = logBtn.dataset.price || "";
-      form.buy_date.value = new Date().toISOString().slice(0, 10);
+      form.buy_date.value = twToday();
       dlg.showModal();
+      return;
+    }
+    if (e.target.id === "line-login") {
+      liff.login({redirectUri: location.href});
       return;
     }
     if (e.target.id === "add-holding") {
       form.reset();
-      form.buy_date.value = new Date().toISOString().slice(0, 10);
+      form.buy_date.value = twToday();
       dlg.showModal();
     }
   });
@@ -355,42 +415,82 @@ function wireDialog() {
 
   form.onsubmit = async ev => {
     ev.preventDefault();
+    // Without a LINE identity the row would be saved with no owner, and the
+    // holdings list (filtered by line_user_id) would never show it.
+    if (!profile) {
+      if (liffReady && confirm("需要先用 LINE 登入才能記錄真實持倉，現在登入？")) {
+        liff.login({redirectUri: location.href});
+      } else if (!liffReady) {
+        alert("無法取得 LINE 身分，請從 LINE 聊天室裡的連結開啟此頁再記錄。");
+      }
+      return;
+    }
+    // iOS keyboards in some locales type "," as the decimal separator.
+    const num = v => Number(String(v).trim().replace(",", "."));
     const payload = {
       stock_id: form.stock_id.value.trim(),
-      buy_price: Number(form.buy_price.value),
-      shares: Number(form.shares.value),
+      buy_price: num(form.buy_price.value),
+      shares: num(form.shares.value),
       buy_date: form.buy_date.value,
-      line_user_id: profile ? profile.userId : null,
+      line_user_id: profile.userId,
       status: "open",
     };
+    if (!/^\d{4,6}[A-Z]?$/.test(payload.stock_id) || !(payload.buy_price > 0)
+        || !(payload.shares > 0) || !Number.isInteger(payload.shares)) {
+      alert("請確認代號、買入價與股數（股數需為整數）");
+      return;
+    }
+    const btn = form.querySelector(".btn-save");
+    btn.disabled = true;
     try {
       const r = await fetch(SUPABASE_URL + "/rest/v1/positions_manual", {
         method: "POST",
         headers: {...sbHeaders, "Content-Type": "application/json"},
         body: JSON.stringify([payload]),
       });
-      if (!r.ok) throw new Error(await r.text());
+      if (!r.ok) {
+        const body = await r.text();
+        if (r.status === 401 || r.status === 403 || body.includes("row-level security")) {
+          throw new Error("資料庫拒絕寫入（positions_manual 缺少 RLS insert 權限）\n" + body.slice(0, 200));
+        }
+        throw new Error(`HTTP ${r.status}\n` + body.slice(0, 300));
+      }
       dlg.close();
       await load();
+      document.querySelector('.tab[data-page="page-holdings"]').click();
     } catch (err) {
       alert("儲存失敗：" + err.message);
+    } finally {
+      btn.disabled = false;
     }
   };
 }
 
 async function load() {
-  const today = new Date().toISOString().slice(0, 10);
-  const [stateRows, openRows, closedRows, manualRows] = await Promise.all([
+  const today = twToday();
+  const [stateRows, openRows, closedRows, manualRows, quoteRows] = await Promise.all([
     sbGet("daily_state?order=run_date.desc&limit=1"),
     sbGet("simulated_positions?status=eq.open&order=entry_date.asc"),
     sbGet("simulated_positions?status=eq.closed&order=exit_date.desc&limit=50"),
     profile
       ? sbGet(`positions_manual?status=eq.open&line_user_id=eq.${encodeURIComponent(profile.userId)}&order=buy_date.desc`)
       : Promise.resolve([]),
+    // Written by the screener's intraday job; if it's missing the page still
+    // renders, just without live prices/names.
+    fetch(SUPABASE_URL + "/storage/v1/object/public/dashboard/quotes.json?t=" + Date.now())
+      .then(r => r.ok ? r.json() : {quotes: {}})
+      .then(j => Object.values(j.quotes || {}))
+      .catch(e => { console.warn("quotes.json:", e); return []; }),
   ]);
 
   const state = stateRows[0] || null;
   const exits = state && state.run_date === today ? (state.exits_today || []) : [];
+
+  quotes = Object.fromEntries(quoteRows.map(q => [q.stock_id, q]));
+  names = {};
+  for (const r of [...(state?.long_candidates || []), ...(state?.exits_today || []), ...quoteRows]) {
+    if (r.stock_name) names[r.stock_id] = r.stock_name;
+  }
 
   renderToday(state, exits, openRows);
   renderHoldings(openRows, manualRows);
@@ -414,12 +514,16 @@ document.querySelectorAll(".tab").forEach(btn => {
   wireDialog();
   try {
     await liff.init({liffId: LIFF_ID});
+    liffReady = true;
     if (liff.isLoggedIn()) {
       profile = await liff.getProfile();
     } else if (liff.isInClient()) {
       liff.login();
       return;
     }
+    // Outside the LIFF client (e.g. the URL opened in LINE's normal in-app
+    // browser or Safari) the page stays read-only until the user taps
+    // "用 LINE 登入" on the holdings tab.
   } catch (e) {
     // Opened outside LINE (plain browser) — still usable read-only; the
     // manual-holdings list just can't be tied to a LINE identity.
@@ -432,6 +536,17 @@ document.querySelectorAll(".tab").forEach(btn => {
       `<div class="error-box">資料載入失敗：${esc(e.message)}</div>`;
   }
 })();
+
+// Prices move during the session; re-pull when the page comes back to the
+// foreground (switching back to LINE) and every few minutes while open.
+async function refresh() {
+  if (document.visibilityState !== "visible" || document.getElementById("log-dialog").open) return;
+  const active = document.querySelector(".tab.active")?.dataset.page;
+  try { await load(); } catch (e) { console.warn("refresh failed:", e); return; }
+  if (active) document.querySelector(`.tab[data-page="${active}"]`).click();
+}
+document.addEventListener("visibilitychange", refresh);
+setInterval(refresh, 5 * 60e3);
 </script>
 </body>
 </html>
