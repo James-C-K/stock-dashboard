@@ -178,7 +178,7 @@ const md = d => d ? String(d).slice(5).replace("-", "/") : "";
 // which is still "yesterday" before 08:00 in Taipei.
 const twToday = () => new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 10);
 
-// Filled by load(): latest price + name per ticker (Supabase live_quotes).
+// Filled by load(): latest price + name per ticker (Storage dashboard/quotes.json).
 let quotes = {};
 let names = {};
 const nameTag = id => names[id] ? `<span class="name">${esc(names[id])}</span>` : "";
@@ -475,9 +475,12 @@ async function load() {
     profile
       ? sbGet(`positions_manual?status=eq.open&line_user_id=eq.${encodeURIComponent(profile.userId)}&order=buy_date.desc`)
       : Promise.resolve([]),
-    // Optional: if the live_quotes table isn't there yet, the page still
+    // Written by the screener's intraday job; if it's missing the page still
     // renders, just without live prices/names.
-    sbGet("live_quotes?select=*").catch(e => { console.warn("live_quotes:", e); return []; }),
+    fetch(SUPABASE_URL + "/storage/v1/object/public/dashboard/quotes.json?t=" + Date.now())
+      .then(r => r.ok ? r.json() : {quotes: {}})
+      .then(j => Object.values(j.quotes || {}))
+      .catch(e => { console.warn("quotes.json:", e); return []; }),
   ]);
 
   const state = stateRows[0] || null;
