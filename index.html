@@ -128,8 +128,19 @@
   dialog::backdrop{background:rgba(0,0,0,.6)}
   dialog h3{margin:0 0 14px;font-size:15px}
   dialog label{display:block;font-size:11px;color:var(--text-dim);margin:10px 0 4px}
+  /* 16px minimum: iOS Safari zooms into any smaller input on focus and
+     doesn't zoom back out after the dialog closes. */
   dialog input{width:100%;padding:9px;border-radius:8px;border:1px solid var(--card-border);
-    background:#0f1219;color:var(--text);font-size:14px;font-family:inherit}
+    background:#0f1219;color:var(--text);font-size:16px;font-family:inherit}
+  dialog .row2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  dialog .calc{margin-top:12px;padding:9px 10px;border-radius:9px;background:rgba(255,255,255,.04);
+    font-size:12px;line-height:1.7;color:var(--text-dim)}
+  dialog .calc b{color:var(--text)}
+  .card-actions{display:flex;gap:8px;margin-top:10px}
+  .card-actions button{flex:1;padding:8px;border-radius:9px;font-size:12px;font-weight:700;border:none}
+  .btn-sell{background:rgba(255,92,92,.18);color:#ffb3b3}
+  .btn-void{background:rgba(255,255,255,.06);color:var(--text-dim)}
+  .hist-row .void-link{background:none;border:none;color:var(--text-dim);font-size:10.5px;padding:0;text-decoration:underline}
   .dialog-actions{display:flex;gap:8px;margin-top:16px}
   .dialog-actions button{flex:1;padding:10px;border-radius:9px;border:none;font-size:12.5px;font-weight:700}
   .btn-cancel{background:var(--card-border);color:var(--text)}
@@ -162,9 +173,43 @@
       <input name="shares" required inputmode="numeric" placeholder="2000">
       <label>買入日期</label>
       <input name="buy_date" type="date" required>
+      <div class="row2">
+        <div><label>手續費折數（例 6 折填 0.6）</label>
+          <input name="discount" inputmode="decimal" placeholder="1"></div>
+        <div><label>買進手續費 NT$</label>
+          <input name="fee" inputmode="numeric" placeholder="自動計算"></div>
+      </div>
+      <div class="calc" id="buy-calc"></div>
       <div class="dialog-actions">
-        <button type="button" class="btn-cancel" id="dlg-cancel">取消</button>
+        <button type="button" class="btn-cancel" data-close>取消</button>
         <button type="submit" class="btn-save">儲存</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="sell-dialog">
+    <h3 id="sell-title">記錄賣出</h3>
+    <form id="sell-form">
+      <div class="row2">
+        <div><label>賣出價（每股 NT$）</label>
+          <input name="price" required inputmode="decimal"></div>
+        <div><label>賣出股數</label>
+          <input name="shares" required inputmode="numeric"></div>
+      </div>
+      <label>賣出日期</label>
+      <input name="date" type="date" required>
+      <div class="row2">
+        <div><label>賣出手續費 NT$</label>
+          <input name="fee" inputmode="numeric" placeholder="自動計算"></div>
+        <div><label>證交稅 NT$</label>
+          <input name="tax" inputmode="numeric" placeholder="自動計算"></div>
+      </div>
+      <label>賣出原因（選填）</label>
+      <input name="reason" placeholder="例：跌破月線、移動停利">
+      <div class="calc" id="sell-calc"></div>
+      <div class="dialog-actions">
+        <button type="button" class="btn-cancel" data-close>取消</button>
+        <button type="submit" class="btn-save" style="background:var(--red);color:#fff">確認賣出</button>
       </div>
     </form>
   </dialog>
@@ -412,8 +457,59 @@ function holdingCard(p, kind) {
   </div>`;
 }
 
+// ── Real-trade ledger ───────────────────────────────────────────────────
+// positions_manual is append-only from this page (the public key may insert
+// and read, not update or delete), which also keeps a full audit trail:
+//   status "open" = a buy lot     note: {"fee": buy fee}
+//   status "sell" = a sale        note: {"ref": buy lot id, "fee", "tax"}
+//                                 (exit_price/exit_date/shares = the sale)
+//   status "void" = cancels a row note: {"ref": cancelled row id}
+// A lot's remaining shares = its shares minus the sales that reference it.
+const meta = r => { try { return JSON.parse(r.note || "{}") || {}; } catch (_) { return {}; } };
+let ledger = {lots: [], trades: [], byId: {}};
+
+function buildLedger(rows) {
+  const voided = new Set(rows.filter(r => r.status === "void").map(r => meta(r).ref));
+  const live = rows.filter(r => r.status !== "void" && !voided.has(r.id));
+  const buys = live.filter(r => r.status === "open");
+  const sells = live.filter(r => r.status === "sell");
+  const byId = Object.fromEntries(buys.map(b => [b.id, b]));
+  const sold = {};
+  for (const s of sells) sold[meta(s).ref] = (sold[meta(s).ref] || 0) + Number(s.shares);
+
+  const lots = buys.map(b => {
+    const shares = Number(b.shares), fee = Number(meta(b).fee || 0);
+    const remaining = shares - (sold[b.id] || 0);
+    return {...b, fee, remaining, feeLeft: fee * remaining / shares};
+  }).filter(l => l.remaining > 0);
+
+  const trades = sells.map(s => {
+    const b = byId[meta(s).ref] || {};
+    const n = Number(s.shares), m = meta(s);
+    const buyFee = Number(meta(b).fee || 0) * n / Number(b.shares || n);
+    const cost = Number(s.buy_price) * n + buyFee;
+    const proceeds = Number(s.exit_price) * n - Number(m.fee || 0) - Number(m.tax || 0);
+    return {...s, cost, proceeds, pnl: proceeds - cost, pnlPct: (proceeds / cost - 1) * 100,
+            fees: buyFee + Number(m.fee || 0) + Number(m.tax || 0)};
+  }).sort((a, b) => String(b.exit_date).localeCompare(String(a.exit_date)));
+
+  ledger = {lots, trades, byId};
+}
+
+// Taiwan costs: brokerage 0.1425% × broker discount (min NT$20 per board-lot
+// order, NT$1 for odd lots), securities transaction tax on sells 0.3%
+// (ETFs, codes starting 00, 0.1%). Pre-filled, always editable.
+function loadDiscount() { try { return Number(localStorage.getItem("feeDiscount")) || 1; } catch (_) { return 1; } }
+function saveDiscount(v) { try { localStorage.setItem("feeDiscount", String(v)); } catch (_) {} }
+function brokerFee(amount, shares, discount) {
+  if (!(amount > 0)) return 0;
+  return Math.max(shares % 1000 === 0 ? 20 : 1, Math.floor(amount * 0.001425 * discount));
+}
+const sellTax = (amount, sid) => Math.floor(amount * (String(sid).startsWith("00") ? 0.001 : 0.003));
+
 function renderHoldings(openPositions, myManual) {
   const el = document.getElementById("page-holdings");
+  myManual = ledger.lots;
   let h = `<div class="section-title">💰 我的真實持倉 <span class="count">${myManual.length}</span></div>`;
   if (!profile) {
     h += `<div class="gate-warn">尚未登入 LINE — 真實持倉是依你的 LINE 帳號儲存與讀取，
@@ -426,24 +522,32 @@ function renderHoldings(openPositions, myManual) {
       尚未記錄任何真實買入</div>`;
   } else {
     h += myManual.map(m => {
-      const cost = Number(m.buy_price) * Number(m.shares);
       const q = quotes[m.stock_id];
-      const price = q ? Number(q.price) : Number(m.buy_price);
-      const pnl = (price / Number(m.buy_price) - 1) * 100;
-      const pnlNt = Math.round((price - Number(m.buy_price)) * Number(m.shares));
+      const n = m.remaining, bp = Number(m.buy_price);
+      const cost = bp * n + m.feeLeft;
+      const price = q ? Number(q.price) : bp;
+      const value = price * n;
+      // What you'd actually pocket selling now: minus sell fee and tax.
+      const netNow = value - brokerFee(value, n, loadDiscount()) - sellTax(value, m.stock_id) - cost;
+      const pnlPct = (price / bp - 1) * 100;
       return `<div class="card">
         <div class="card-head"><span class="id">${esc(m.stock_id)}</span>${nameTag(m.stock_id)}
           <span class="source-tag real">💰 真實持倉</span>
-          <span class="price">${price.toFixed(2)}</span>
-          ${q ? `<span class="pct ${pctClass(pnl)}">${fmtPct(pnl)}</span>` : ""}</div>
+          <span class="price">${f2(price)}</span>
+          ${q ? `<span class="pct ${pctClass(pnlPct)}">${fmtPct(pnlPct)}</span>` : ""}</div>
         <div class="meta-grid">
-          <div>買入<span class="val">${md(m.buy_date)} @${Number(m.buy_price).toFixed(2)}</span></div>
-          <div>股數<span class="val">${Number(m.shares).toLocaleString()}</span></div>
-          <div>損益<span class="val" style="color:${!q ? "var(--text)" : pnlNt >= 0 ? "var(--green)" : "var(--red)"}">
-            ${q ? (pnlNt >= 0 ? "+" : "−") + "NT$" + Math.abs(pnlNt).toLocaleString() : "—"}</span></div>
+          <div>買入 ${md(m.buy_date)}<span class="val">@${f2(bp)}</span></div>
+          <div>持有股數<span class="val">${n.toLocaleString()}${n < Number(m.shares) ? `<small>／${Number(m.shares).toLocaleString()}</small>` : ""}</span></div>
+          <div>現在賣出淨損益<span class="val" style="color:${!q ? "var(--text)" : netNow >= 0 ? "var(--green)" : "var(--red)"}">
+            ${q ? nt(netNow) : "—"}</span></div>
         </div>
-        <div class="quote-line">成本 NT$${Math.round(cost).toLocaleString()}${q ? " · 更新 " + esc(quoteTime(q)) : " · 尚無報價"}</div>
+        <div class="quote-line">成本 NT$${Math.round(cost).toLocaleString()}（含買進手續費 ${Math.round(m.feeLeft)}）
+          · 淨損益已扣賣出手續費與證交稅（估）${q ? " · " + esc(quoteTime(q)) : " · 尚無報價"}</div>
         ${ohlcBlock(q)}
+        <div class="card-actions">
+          <button class="btn-sell" data-sell="${esc(m.id)}">賣出</button>
+          <button class="btn-void" data-void="${esc(m.id)}" data-label="${esc(m.stock_id)} ${md(m.buy_date)} 買入 ${n} 股">刪除這筆（記錯了）</button>
+        </div>
       </div>`;
     }).join("");
   }
@@ -460,10 +564,35 @@ function renderHoldings(openPositions, myManual) {
   el.innerHTML = h;
 }
 
+function realTradesSection() {
+  const t = ledger.trades;
+  if (!t.length) return profile ? `<div class="section-title">💰 我的真實交易</div>
+    <div class="card" style="text-align:center;color:var(--text-dim);font-size:13px">還沒有賣出紀錄</div>` : "";
+  const total = t.reduce((a, x) => a + x.pnl, 0), fees = t.reduce((a, x) => a + x.fees, 0);
+  const wins = t.filter(x => x.pnl > 0).length;
+  return `<div class="section-title">💰 我的真實交易</div>
+    <div class="card"><div class="stat-grid">
+      <div class="stat-box"><div class="num ${total >= 0 ? "g" : "r"}">${nt(total)}</div><div class="label">已實現淨損益</div></div>
+      <div class="stat-box"><div class="num">${(wins / t.length * 100).toFixed(0)}%</div><div class="label">勝率（${wins}勝${t.length - wins}敗）</div></div>
+      <div class="stat-box"><div class="num">${t.length}</div><div class="label">賣出筆數</div></div>
+      <div class="stat-box"><div class="num">NT$${Math.round(fees).toLocaleString()}</div><div class="label">手續費＋稅合計</div></div>
+    </div></div>
+    <div class="card">` + t.map(x => `<div class="hist-row">
+      <span class="id">${esc(x.stock_id)}</span>
+      <span class="dates">${names[x.stock_id] ? esc(names[x.stock_id]) + "　" : ""}${Number(x.shares).toLocaleString()} 股<br>
+        ${md(x.buy_date)} @${f2(x.buy_price)} → ${md(x.exit_date)} @${f2(x.exit_price)}<br>
+        費用 NT$${Math.round(x.fees).toLocaleString()}${x.exit_reason ? "｜" + esc(x.exit_reason) : ""}
+        <button class="void-link" data-void="${esc(x.id)}" data-label="${esc(x.stock_id)} ${md(x.exit_date)} 賣出 ${x.shares} 股">刪除</button></span>
+      <span class="pnl" style="color:${x.pnl >= 0 ? "var(--green)" : "var(--red)"}">${nt(x.pnl)}<br>
+        <small>${fmtPct(x.pnlPct)}</small></span>
+    </div>`).join("") + `</div>`;
+}
+
 function renderHistory(closed) {
   const el = document.getElementById("page-history");
   if (!closed.length) {
-    el.innerHTML = `<div class="card" style="text-align:center;color:var(--text-dim);font-size:13px">
+    el.innerHTML = realTradesSection() + `<div class="section-title">📊 系統模擬實際成績</div>
+      <div class="card" style="text-align:center;color:var(--text-dim);font-size:13px">
       尚無已平倉的模擬交易紀錄</div>
       <div class="footer-note">系統開始運作後，每筆模擬進出場都會記錄在這裡</div>`;
     return;
@@ -472,7 +601,7 @@ function renderHistory(closed) {
   const losses = closed.filter(t => Number(t.pnl_pct) <= 0);
   const avg = a => a.length ? a.reduce((s,t)=>s+Number(t.pnl_pct),0)/a.length : 0;
 
-  let h = `<div class="section-title">📊 系統模擬實際成績</div>
+  let h = realTradesSection() + `<div class="section-title">📊 系統模擬實際成績</div>
     <div class="card"><div class="stat-grid">
       <div class="stat-box"><div class="num">${closed.length}</div><div class="label">已平倉筆數</div></div>
       <div class="stat-box"><div class="num">${(wins.length/closed.length*100).toFixed(1)}%</div>
@@ -494,82 +623,178 @@ function renderHistory(closed) {
   el.innerHTML = h;
 }
 
+// iOS keyboards in some locales type "," as the decimal separator.
+const num = v => Number(String(v ?? "").trim().replace(",", "."));
+
+// Without a LINE identity a row would be saved with no owner, and the
+// holdings list (filtered by line_user_id) would never show it.
+function requireProfile() {
+  if (profile) return true;
+  if (liffReady && confirm("需要先用 LINE 登入才能記錄真實持倉，現在登入？")) {
+    liff.login({redirectUri: location.href});
+  } else if (!liffReady) {
+    alert("無法取得 LINE 身分，請從 LINE 聊天室裡的連結開啟此頁再記錄。");
+  }
+  return false;
+}
+
+async function insertRow(payload) {
+  const r = await fetch(SUPABASE_URL + "/rest/v1/positions_manual", {
+    method: "POST",
+    headers: {...sbHeaders, "Content-Type": "application/json"},
+    body: JSON.stringify([{line_user_id: profile.userId, ...payload}]),
+  });
+  if (!r.ok) {
+    const body = await r.text();
+    if (r.status === 401 || r.status === 403 || body.includes("row-level security")) {
+      throw new Error("資料庫拒絕寫入（positions_manual 缺少 RLS insert 權限）\n" + body.slice(0, 200));
+    }
+    throw new Error(`HTTP ${r.status}\n` + body.slice(0, 300));
+  }
+}
+
+async function saveAndReload(dlg, btn, payload, tab) {
+  btn.disabled = true;
+  try {
+    await insertRow(payload);
+    dlg?.close();
+    await load();
+    document.querySelector(`.tab[data-page="${tab}"]`).click();
+  } catch (err) {
+    alert("儲存失敗：" + err.message);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
 function wireDialog() {
   const dlg = document.getElementById("log-dialog");
   const form = document.getElementById("log-form");
+  const sdlg = document.getElementById("sell-dialog");
+  const sform = document.getElementById("sell-form");
+  let selling = null;  // the lot being sold
 
-  document.body.addEventListener("click", e => {
+  // Buy: recompute the default fee whenever price/shares/discount change,
+  // unless the user typed their own fee.
+  let buyFeeTouched = false;
+  const buyCalc = () => {
+    const price = num(form.buy_price.value), n = num(form.shares.value);
+    const disc = num(form.discount.value) || 1;
+    const amount = price * n;
+    if (!buyFeeTouched) form.fee.value = amount > 0 ? brokerFee(amount, n, disc) : "";
+    const fee = num(form.fee.value) || 0;
+    document.getElementById("buy-calc").innerHTML = amount > 0
+      ? `成交金額 <b>NT$${Math.round(amount).toLocaleString()}</b> ＋ 手續費 <b>${fee}</b>
+         ＝ 總成本 <b>NT$${Math.round(amount + fee).toLocaleString()}</b>` : "";
+  };
+  form.fee.addEventListener("input", () => { buyFeeTouched = form.fee.value !== ""; buyCalc(); });
+  ["buy_price", "shares", "discount"].forEach(k => form[k].addEventListener("input", buyCalc));
+  const openBuy = (sid = "", price = "") => {
+    form.reset();
+    buyFeeTouched = false;
+    form.stock_id.value = sid;
+    form.buy_price.value = price;
+    form.buy_date.value = twToday();
+    form.discount.value = loadDiscount() === 1 ? "" : loadDiscount();
+    buyCalc();
+    dlg.showModal();
+  };
+
+  // Sell: same idea, plus the securities transaction tax and a P/L preview.
+  let sellFeeTouched = false, sellTaxTouched = false;
+  const sellCalc = () => {
+    if (!selling) return;
+    const price = num(sform.price.value), n = num(sform.shares.value);
+    const amount = price * n;
+    if (!sellFeeTouched) sform.fee.value = amount > 0 ? brokerFee(amount, n, loadDiscount()) : "";
+    if (!sellTaxTouched) sform.tax.value = amount > 0 ? sellTax(amount, selling.stock_id) : "";
+    const fee = num(sform.fee.value) || 0, tax = num(sform.tax.value) || 0;
+    const buyFee = selling.fee * n / Number(selling.shares);
+    const cost = Number(selling.buy_price) * n + buyFee;
+    const net = amount - fee - tax;
+    document.getElementById("sell-calc").innerHTML = amount > 0 && n <= selling.remaining
+      ? `賣出金額 NT$${Math.round(amount).toLocaleString()} − 手續費 ${fee} − 證交稅 ${tax}
+         ＝ 實收 <b>NT$${Math.round(net).toLocaleString()}</b><br>
+         成本 NT$${Math.round(cost).toLocaleString()}（含買進手續費 ${Math.round(buyFee)}）→
+         淨損益 <b style="color:${net - cost >= 0 ? "var(--green)" : "var(--red)"}">${nt(net - cost)}
+         （${fmtPct((net / cost - 1) * 100)}）</b>`
+      : n > selling.remaining ? `<span style="color:var(--red)">最多只能賣 ${selling.remaining} 股</span>` : "";
+  };
+  sform.fee.addEventListener("input", () => { sellFeeTouched = sform.fee.value !== ""; sellCalc(); });
+  sform.tax.addEventListener("input", () => { sellTaxTouched = sform.tax.value !== ""; sellCalc(); });
+  ["price", "shares"].forEach(k => sform[k].addEventListener("input", sellCalc));
+
+  document.body.addEventListener("click", async e => {
+    if (e.target.closest("[data-close]")) { e.target.closest("dialog").close(); return; }
     const logBtn = e.target.closest("[data-log]");
-    if (logBtn) {
-      form.stock_id.value = logBtn.dataset.log;
-      form.buy_price.value = logBtn.dataset.price || "";
-      form.buy_date.value = twToday();
-      dlg.showModal();
+    if (logBtn) { openBuy(logBtn.dataset.log, logBtn.dataset.price || ""); return; }
+    if (e.target.id === "line-login") { liff.login({redirectUri: location.href}); return; }
+    if (e.target.id === "add-holding") { openBuy(); return; }
+
+    const sellBtn = e.target.closest("[data-sell]");
+    if (sellBtn) {
+      selling = ledger.lots.find(l => l.id === sellBtn.dataset.sell);
+      if (!selling) return;
+      sform.reset();
+      sellFeeTouched = sellTaxTouched = false;
+      const q = quotes[selling.stock_id];
+      document.getElementById("sell-title").textContent =
+        `記錄賣出 ${selling.stock_id} ${names[selling.stock_id] || ""}（持有 ${selling.remaining} 股）`;
+      sform.price.value = q ? q.price : "";
+      sform.shares.value = selling.remaining;
+      sform.date.value = twToday();
+      sellCalc();
+      sdlg.showModal();
       return;
     }
-    if (e.target.id === "line-login") {
-      liff.login({redirectUri: location.href});
-      return;
-    }
-    if (e.target.id === "add-holding") {
-      form.reset();
-      form.buy_date.value = twToday();
-      dlg.showModal();
+
+    const voidBtn = e.target.closest("[data-void]");
+    if (voidBtn) {
+      if (!requireProfile()) return;
+      if (!confirm(`確定刪除「${voidBtn.dataset.label}」這筆紀錄？\n（資料庫會保留一筆作廢註記，畫面上不再顯示）`)) return;
+      const row = ledger.byId[voidBtn.dataset.void] || ledger.trades.find(t => t.id === voidBtn.dataset.void);
+      await saveAndReload(null, voidBtn, {
+        stock_id: row?.stock_id || "0000", shares: 0, buy_price: 0, buy_date: twToday(),
+        status: "void", note: JSON.stringify({ref: voidBtn.dataset.void}),
+      }, document.querySelector(".tab.active")?.dataset.page || "page-holdings");
     }
   });
 
-  document.getElementById("dlg-cancel").onclick = () => dlg.close();
-
   form.onsubmit = async ev => {
     ev.preventDefault();
-    // Without a LINE identity the row would be saved with no owner, and the
-    // holdings list (filtered by line_user_id) would never show it.
-    if (!profile) {
-      if (liffReady && confirm("需要先用 LINE 登入才能記錄真實持倉，現在登入？")) {
-        liff.login({redirectUri: location.href});
-      } else if (!liffReady) {
-        alert("無法取得 LINE 身分，請從 LINE 聊天室裡的連結開啟此頁再記錄。");
-      }
-      return;
-    }
-    // iOS keyboards in some locales type "," as the decimal separator.
-    const num = v => Number(String(v).trim().replace(",", "."));
-    const payload = {
-      stock_id: form.stock_id.value.trim(),
-      buy_price: num(form.buy_price.value),
-      shares: num(form.shares.value),
-      buy_date: form.buy_date.value,
-      line_user_id: profile.userId,
-      status: "open",
-    };
-    if (!/^\d{4,6}[A-Z]?$/.test(payload.stock_id) || !(payload.buy_price > 0)
-        || !(payload.shares > 0) || !Number.isInteger(payload.shares)) {
+    if (!requireProfile()) return;
+    const price = num(form.buy_price.value), n = num(form.shares.value);
+    const disc = num(form.discount.value);
+    const fee = Math.round(num(form.fee.value) || 0);
+    const sid = form.stock_id.value.trim();
+    if (!/^\d{4,6}[A-Z]?$/.test(sid) || !(price > 0) || !(n > 0) || !Number.isInteger(n)) {
       alert("請確認代號、買入價與股數（股數需為整數）");
       return;
     }
-    const btn = form.querySelector(".btn-save");
-    btn.disabled = true;
-    try {
-      const r = await fetch(SUPABASE_URL + "/rest/v1/positions_manual", {
-        method: "POST",
-        headers: {...sbHeaders, "Content-Type": "application/json"},
-        body: JSON.stringify([payload]),
-      });
-      if (!r.ok) {
-        const body = await r.text();
-        if (r.status === 401 || r.status === 403 || body.includes("row-level security")) {
-          throw new Error("資料庫拒絕寫入（positions_manual 缺少 RLS insert 權限）\n" + body.slice(0, 200));
-        }
-        throw new Error(`HTTP ${r.status}\n` + body.slice(0, 300));
-      }
-      dlg.close();
-      await load();
-      document.querySelector('.tab[data-page="page-holdings"]').click();
-    } catch (err) {
-      alert("儲存失敗：" + err.message);
-    } finally {
-      btn.disabled = false;
+    if (disc > 0 && disc <= 1) saveDiscount(disc);
+    await saveAndReload(dlg, form.querySelector(".btn-save"), {
+      stock_id: sid, buy_price: price, shares: n, buy_date: form.buy_date.value,
+      cost_total: Math.round(price * n + fee), status: "open", note: JSON.stringify({fee}),
+    }, "page-holdings");
+  };
+
+  sform.onsubmit = async ev => {
+    ev.preventDefault();
+    if (!requireProfile() || !selling) return;
+    const price = num(sform.price.value), n = num(sform.shares.value);
+    if (!(price > 0) || !(n > 0) || !Number.isInteger(n) || n > selling.remaining) {
+      alert(`請確認賣出價與股數（1～${selling.remaining} 股的整數）`);
+      return;
     }
+    const fee = Math.round(num(sform.fee.value) || 0), tax = Math.round(num(sform.tax.value) || 0);
+    await saveAndReload(sdlg, sform.querySelector(".btn-save"), {
+      stock_id: selling.stock_id, shares: n,
+      // the lot's buy side, so every sale row is self-contained for analysis
+      buy_price: Number(selling.buy_price), buy_date: selling.buy_date,
+      cost_total: Math.round(Number(selling.buy_price) * n + selling.fee * n / Number(selling.shares)),
+      exit_price: price, exit_date: sform.date.value, exit_reason: sform.reason.value.trim() || null,
+      status: "sell", note: JSON.stringify({ref: selling.id, fee, tax}),
+    }, "page-history");
   };
 }
 
@@ -580,7 +805,7 @@ async function load() {
     sbGet("simulated_positions?status=eq.open&order=entry_date.asc"),
     sbGet("simulated_positions?status=eq.closed&order=exit_date.desc&limit=50"),
     profile
-      ? sbGet(`positions_manual?status=eq.open&line_user_id=eq.${encodeURIComponent(profile.userId)}&order=buy_date.desc`)
+      ? sbGet(`positions_manual?line_user_id=eq.${encodeURIComponent(profile.userId)}&order=buy_date.desc,created_at.desc`)
       : Promise.resolve([]),
     // Written by the screener's intraday job; if it's missing the page still
     // renders, just without live prices/names.
@@ -599,6 +824,7 @@ async function load() {
     if (r.stock_name) names[r.stock_id] = r.stock_name;
   }
 
+  buildLedger(manualRows);
   renderToday(state, exits, openRows);
   renderHoldings(openRows, manualRows);
   renderHistory(closedRows);
@@ -657,7 +883,7 @@ document.querySelectorAll(".tab").forEach(btn => {
 // Prices move during the session; re-pull when the page comes back to the
 // foreground (switching back to LINE) and every few minutes while open.
 async function refresh() {
-  if (document.visibilityState !== "visible" || document.getElementById("log-dialog").open) return;
+  if (document.visibilityState !== "visible" || document.querySelector("dialog[open]")) return;
   const active = document.querySelector(".tab.active")?.dataset.page;
   try { await load(); } catch (e) { console.warn("refresh failed:", e); return; }
   if (active) document.querySelector(`.tab[data-page="${active}"]`).click();
